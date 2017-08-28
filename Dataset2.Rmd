@@ -1,0 +1,436 @@
+---
+title: "OlaJumokes Analysis Dataset 2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(readxl)
+library(haven)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(rjags)
+library(runjags)
+library(R2jags)
+library(ggplot2)
+library(nlme)
+library(data.table)
+library(mice)
+library(xtable)
+library(minpack.lm)
+library(lme4)
+#library(brglm)
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Reading in The Data and Cleaning
+
+```{r}
+setwd("C:/Users/uhstudent/Downloads")
+#Response=biRadmit
+medicare <- read_excel("Medicare data.xls",sheet="AnhsData_bishort",
+                     range="A1:K4876")
+
+
+#transfroming to spread version
+medicare2 <- data.table::dcast(setDT(medicare),PNUM_R~time,value.var="biRadmit")
+names(medicare2)[2:4] <- paste0("biRadmit",names(medicare2)[2:4])
+medicare3 <- data.table::dcast(setDT(medicare),PNUM_R~time,value.var="DX101")
+names(medicare3)[2:4] <- paste0("DX101",names(medicare3)[2:4])
+medicare4 <- data.table::dcast(setDT(medicare),PNUM_R~time,value.var="DX100")
+names(medicare4)[2:4] <- paste0("DX100",names(medicare4)[2:4])
+medicare5 <- data.table::dcast(setDT(medicare),PNUM_R~time,value.var="LOS")
+names(medicare5)[2:4] <- paste0("LOS",names(medicare5)[2:4])
+
+#binding things together
+medicare_wide <- merge(medicare2,medicare3,by='PNUM_R') %>% merge(x=.,y=medicare4,
+                      by='PNUM_R') %>% merge(x=.,y=medicare5,by='PNUM_R')
+medicare_long <- medicare
+#removing all unused dataset
+rm(list=ls()[!(ls() %in% c("medicare_wide","medicare_long"))])
+medicare_widee = medicare_wide
+
+# Exploratory complete
+Proportion <- c(mean(medicare_widee$biRadmit1),mean(medicare_widee$biRadmit2),mean(medicare_widee$biRadmit3))
+Timepoint = c(1,2,3)
+compressed = data.frame(Proportion,Timepoint)
+#proportion per time points
+ggplot(data=compressed,aes(x=Timepoint,y=Proportion,col="Red")) + geom_line(alpha=0.7) + theme_classic()
+
+
+
+# Generate random stuffs to eliminate from dataset
+set.seed(5)
+medicare_wide$biRadmit1[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$biRadmit2[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$biRadmit3[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1011[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1012[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1013[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1001[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1002[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+medicare_wide$DX1003[medicare_wide$PNUM_R %in% sample(medicare_wide$PNUM_R, 325) ] <- NA
+
+# Exploratory incomplete
+ProportionI <- c(mean(medicare_wide$biRadmit1,na.rm=T),mean(medicare_wide$biRadmit2,na.rm=T),mean(medicare_wide$biRadmit3,na.rm=T))
+Timepoint = c(1,2,3)
+compressedI = data.frame(ProportionI,Timepoint)
+#proportion per time points
+ggplot(data=compressedI,aes(x=Timepoint,y=ProportionI,col="Red")) + geom_line(alpha=0.7) + theme_classic() + geom_vline(xintercept=2,lty=2)
+
+
+#piecewise modeling
+medicare_long$timespline <- NULL
+medicare_long$timespline = ifelse (medicare_long$time <= 2, 0, medicare_long$time - 2) 
+
+#changing the missing data to long format
+medicare_longg <- medicare_wide %>% gather(key=Visit,value=biRadmit,biRadmit1:biRadmit3)
+medicare_longg <- medicare_longg %>% dplyr::select(PNUM_R,Visit,biRadmit) %>% 
+  mutate(Visit=as.numeric(gsub("biRadmit","",Visit)))
+
+medicare_longg1 <- medicare_wide %>% gather(key=Visit,value=DX101,DX1011:DX1013)
+medicare_longg1 <- medicare_longg1 %>% dplyr::select(PNUM_R,Visit,DX101) %>% 
+  mutate(Visit=as.numeric(gsub("DX101","",Visit)))
+
+medicare_longg2 <- medicare_wide %>% gather(key=Visit,value=DX100,DX1001:DX1003)
+medicare_longg2 <- medicare_longg2 %>% dplyr::select(PNUM_R,Visit,DX100) %>% 
+  mutate(Visit=as.numeric(gsub("DX100","",Visit)))
+
+medicare_longg3 <- medicare_wide %>% gather(key=Visit,value=LOS,LOS1:LOS3)
+medicare_longg3 <- medicare_longg3 %>% dplyr::select(PNUM_R,Visit,LOS) %>% 
+  mutate(Visit=as.numeric(gsub("LOS","",Visit)))
+
+medicare_longgg <- merge(medicare_longg,medicare_longg1,by=c("PNUM_R","Visit")) %>% merge(x=.,y=medicare_longg2,by=c("PNUM_R","Visit")) %>% merge(x=.,y=medicare_longg3,by=c("PNUM_R","Visit"))
+
+medicare_longNA = medicare_longgg
+medicare_wideNA = medicare_wide
+medicare_long = medicare_long
+medicare_wide = medicare_widee
+
+
+rm(list=ls()[!(ls() %in% c("medicare_wide","medicare_long","medicare_wideNA","medicare_longNA"))])
+
+names(medicare_longNA)[2] = "time"
+medicare_longNA$timespline <- NULL
+medicare_longNA$timespline = ifelse (medicare_longNA$time <= 2, 0, medicare_longNA$time - 2) 
+
+#fitting using lmer normal
+summary(glmer(biRadmit ~ time + timespline + LOS + DX101 + DX100 + (1| PNUM_R), data=medicare_longNA,family= binomial(link = "logit"),na.action = na.omit,nAGQ=20))
+
+#fitting using lmer traditional  
+means1 <- aggregate(medicare_longNA[, 4], list(medicare_longNA$PNUM_R), mean,na.rm=T)
+names(means1) = c("PNUM_R","Between101")
+means2 <- aggregate(medicare_longNA[, 5], list(medicare_longNA$PNUM_R), mean,na.rm=T)
+names(means2) = c("PNUM_R","Between100")
+means3 <- aggregate(medicare_longNA[, 6], list(medicare_longNA$PNUM_R), mean,na.rm=T)
+names(means3) = c("PNUM_R","BetweenLOS")
+medicare_longNA = merge(medicare_longNA,means1,by=c("PNUM_R"))
+medicare_longNA = merge(medicare_longNA,means2,by=c("PNUM_R"))
+medicare_longNA = merge(medicare_longNA,means3,by=c("PNUM_R"))
+
+medicare_longNA$Between101[which(is.na(medicare_longNA$DX101))] <- NA
+medicare_longNA$Between100[which(is.na(medicare_longNA$DX100))] <- NA
+
+# now getting within
+medicare_longNA$within101 <- medicare_longNA$DX101 - medicare_longNA$Between101
+medicare_longNA$within100 <- medicare_longNA$DX100 - medicare_longNA$Between100
+medicare_longNA$withinLOS <- medicare_longNA$LOS - medicare_longNA$BetweenLOS
+
+#initial values for main model
+summary(glmer(biRadmit ~ time + timespline + Between101 + Between100 + BetweenLOS + within101 + within100 + withinLOS + (1| PNUM_R), data=medicare_longNA,family= binomial(link = "logit"),na.action = na.omit,nAGQ=70))
+
+#initial values for CIM1/Latent 1
+summary(glmer(DX100 ~ time + timespline +  BetweenLOS + withinLOS + (1| PNUM_R), data=medicare_longNA,family= binomial(link = "logit"),na.action = na.omit,nAGQ=20))
+
+#initial values for CIM2
+summary(glmer(DX101 ~ time + timespline + BetweenLOS + withinLOS + Between100 + within100 + (1| PNUM_R), data=medicare_longNA,family= binomial(link = "logit"),na.action = na.omit,nAGQ=70))
+
+
+## exploration for DX100
+pps <- medicare_longNA %>% group_by(time) %>% summarise(mm=mean(DX100,na.rm=T))
+pps %>% ggplot(aes(x=time,y=mm)) + geom_line()
+
+# exploration for DX101
+pps2 <- medicare_longNA %>% group_by(time) %>% summarise(mm=mean(DX101,na.rm=T))
+pps2 %>% ggplot(aes(x=time,y=mm)) + geom_line()
+
+```
+
+## Bayesian Approach
+
+## Complete Data Analysis
+
+```{r}
+cat("
+    model{
+            for(i in 1:N){
+                  mdx100[i] <- mean(DX100[i,])
+                  mdx101[i] <- mean(DX101[i,])
+                  mlos[i] <- mean(LOS[i,])
+                for(j in 1:T){
+                    ### MAIN MODEL
+                    biRadmit[i,j] ~ dbern(pi[i,j])
+                    logit(pi[i,j]) <- beta[1] + beta[2]*time[i,j] 
+                                 + beta[3]*timespline[i,j]
+                                 + beta[4]*(DX100[i,j]-mdx100[i]) +                                                  beta[5]*mdx100[i]
+                                 + beta[6]*(DX101[i,j]-mdx101[i]) +                                                  beta[7]*mdx101[i]
+                                 + beta[8]*(LOS[i,j] - mlos[i]) + beta[9]*mlos[i] +                                  b[i]
+
+                    
+  
+                }
+            
+            }
+
+
+        ####-----------------------  Priors ---------------------------------------
+        
+        #priors for beta
+        for(s in 1:9){
+            beta[s] ~ dnorm(0,0.00001)
+        }
+        
+
+      ###priors for the random effect in the main model
+      for(i in 1:N){
+        b[i] ~ dnorm(0, tau.b)
+      }
+      tau.b <- pow(sigma.b,-2)
+        sigma.b ~ dunif(0,100)
+}",file="medicare_FULL.jag")
+
+medi_data3 <- list(N=1625,
+         T=3,
+         biRadmit = as.matrix(medicare_wide[,2:4]),
+         DX100 = apply(as.matrix(medicare_wide[,8:10]),2,sort,na.last=F),
+         DX101 = apply(as.matrix(medicare_wide[,5:7]),2,sort,na.last=F),
+         LOS = as.matrix(medicare_wide[,11:13]),
+         time = matrix(medicare_long$time,ncol=3,nrow=1625,byrow=T),
+         timespline = matrix(medicare_long$timespline,ncol=3,nrow=1625,byrow=T)
+         )
+medi_ini3 <- list( list(beta=c(0.09,-0.37,0.56,0.26,0.31,-0.25,0.004,0.009,0.077),
+                       sigma.b=0.2298,
+                       .RNG.name="base::Super-Duper",.RNG.seed=1),
+                  list(beta=c(0.09,-0.37,0.56,0.26,0.31,-0.25,0.004,0.009,0.077)/2,
+                       sigma.b=0.2298/2,
+                       .RNG.name="base::Wichmann-Hill",.RNG.seed=2))
+model1 <- run.jags(model="medicare_FULL.jag",
+                   monitor=c("beta","sigma.b"),
+                   data=medi_data3,inits=medi_ini3,n.chains=2,thin=4,sample=12500,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,silent.jags=F)
+
+
+### Extracting the DIC
+extract(model1, what="DIC")
+```
+
+
+### MISING COMPLETE
+
+```{r}
+
+medicare_longNA$id <- rep(1:1625,each=3)
+
+medicare_longNA2 <- medicare_longNA[!( is.na(medicare_longNA$DX100) | 
+                                   is.na(medicare_longNA$DX101) ),]
+                                   
+mm100 <-  medicare_longNA2 %>% group_by(PNUM_R) %>% summarise(m100=mean(DX100)) 
+
+mm101 <-  medicare_longNA2 %>% group_by(PNUM_R) %>% summarise(m101=mean(DX101)) 
+
+mmlos <-  medicare_longNA2 %>% group_by(PNUM_R) %>% summarise(mlos=mean(LOS)) 
+
+obs_per_subject <- rowSums(table(medicare_longNA2$PNUM_R,medicare_longNA2$time))
+                                   
+cat("
+    model{
+            for(i in 1:N){
+                    ### MAIN MODEL
+                    biRadmit[i] ~ dbern(pi[i])
+                    logit(pi[i]) <- beta[1] + beta[2]*time[i] 
+                                 + beta[3]*timespline[i]
+                                 + beta[4]*W100[i] + beta[5]*B100[i]
+                                 + beta[6]*W101[i] + beta[7]*B101[i]                                                 + beta[8]*WLOS[i] + beta[9]*BLOS[i] + b[id[i]]
+  
+                }
+
+
+        ####-----------------------  Priors ---------------------------------------
+        
+        #priors for beta
+        for(s in 1:9){
+            beta[s] ~ dnorm(0,0.00001)
+        }
+        
+
+      ###priors for the random effect in the main model
+      for(i in 1:N){
+        b[i] ~ dnorm(0, tau.b)
+      }
+      tau.b <- pow(sigma.b,-2)
+        sigma.b ~ dunif(0,100)
+}",file="medicare_FULLNA.jag")
+
+
+medi_datafullna <- list(N=3100,
+         biRadmit = medicare_longNA2$biRadmit,
+         W100 = medicare_longNA2$DX100 - rep(mm100$m100,times=obs_per_subject),
+         B100 = rep(mm100$m100,times=obs_per_subject),
+         WLOS = medicare_longNA2$LOS - rep(mmlos$mlos,times=obs_per_subject),
+         BLOS = rep(mmlos$mlos,times=obs_per_subject),
+         W101 = medicare_longNA2$DX101 - rep(mm101$m101,times=obs_per_subject),
+         B101 = rep(mm101$m101,times=obs_per_subject),
+         time = medicare_longNA2$time,
+         timespline = medicare_longNA2$timespline,
+         id=medicare_longNA2$id
+         )
+ini_fullna <- list( list(beta=c(0.09,-0.37,0.56,0.26,0.31,-0.25,0.004,0.009,0.077),
+                       sigma.b=0.2298,
+                       .RNG.name="base::Super-Duper",.RNG.seed=1),
+                  list(beta=c(0.09,-0.37,0.56,0.26,0.31,-0.25,0.004,0.009,0.077)/2,
+                       sigma.b=0.2298/2,
+                       .RNG.name="base::Wichmann-Hill",.RNG.seed=2) )
+model2 <- run.jags(model="medicare_FULLNA.jag",
+                   monitor=c("beta","sigma.b"),
+                   data=medi_datafullna,inits=ini_fullna,n.chains=2,
+                   thin=4,sample=12500,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,
+                   silent.jags=F)
+
+### Extracting the DIC
+extract(model2, what="DIC")
+
+```
+
+
+### Sequence full Bayesian (Traditional Approach)
+
+```{r}
+cat("
+    model{
+            for(i in 1:N){
+                  mdx100[i] <- mean(DX100[i,])
+                  mdx101[i] <- mean(DX101[i,])
+                  mlos[i] <- mean(LOS[i,])
+                for(j in 1:T){
+                    ### MAIN MODEL
+                    biRadmit[i,j] ~ dbern(pi[i,j])
+                    biRadmit.new[i,j] ~ dbern(pi[i,j])
+                    logit(pi[i,j]) <- beta[1] + beta[2]*time[i,j] 
+                                 + beta[3]*timespline[i,j]
+                                 + beta[4]*(DX100[i,j]-mdx100[i]) + beta[5]*mdx100[i]
+                                 + beta[6]*(DX101[i,j]-mdx101[i]) + beta[7]*mdx101[i]
+                                 + beta[8]*(LOS[i,j] - mlos[i]) + beta[9]*mlos[i] + b[i]
+
+          ### CIMS
+          DX100[i,j] ~ dbern(qi[i,j])
+          DX100.new[i,j] ~ dbern(qi[i,j])
+          logit(qi[i,j]) <- alpha[1] + alpha[2]*(LOS[i,j] - mlos[i]) 
+                            + alpha[3]*mlos[i] + alpha[4]*time[i,j] 
+                            + alpha[5]*timespline[i,j] + r1[i]
+
+                       
+
+
+          DX101[i,j] ~ dbern(psi[i,j])
+          DX101.new[i,j] ~ dbern(psi[i,j])
+          logit(psi[i,j]) <- alph[1] + alph[2]*(LOS[i,j] -                          mlos[i])  + alph[3]*mlos[i] 
+            + alph[4]*(DX100[i,j]-mdx100[i])
+            + alph[5]*time[i,j] 
+            + alph[6]*timespline[i,j]
+            + r2[i]
+  
+                }
+            
+            }
+
+        ####-----------------------  Priors ---------------------------------------
+        
+        #priors for beta
+        for(s in 1:9){
+            beta[s] ~ dnorm(0,0.0001)
+        }
+
+      ###priors for the random effect in the main model
+      for(i in 1:N){
+        b[i] ~ dnorm(0, tau.b)
+
+        #prior for the random effects in the first CIM model
+        r1[i] ~ dnorm(0, tau.r1)
+        #prior for the random effects in the second CIM model
+        r2[i] ~ dnorm(0, tau.r2)
+      }
+      tau.b <- pow(sigma.b,-2)
+        sigma.b ~ dunif(0,50)
+
+      tau.r1 <- pow(sigma.r1,-2)
+      sigma.r1 ~ dunif(0,50)
+
+      tau.r2 <- pow(sigma.r2,-2)
+      sigma.r2 ~ dunif(0,50)
+
+      ##Priors for the CIMs
+      for(c in 1:5){
+          alpha[c] ~ dnorm(0, 0.00001)
+      }
+
+    for(f in 1:6){
+          alph[f] ~ dnorm(0, 0.00001)
+      }
+
+      
+        
+    }",file="medicare_SCP.jag")
+
+medi_data <- list(N=1625,
+         T=3,
+         biRadmit = as.matrix(medicare_wideNA[,2:4]),
+         DX100 = as.matrix(medicare_wideNA[,8:10]),
+         DX101 = as.matrix(medicare_wideNA[,5:7]),
+         LOS = as.matrix(medicare_wideNA[,11:13]),
+         time = matrix(medicare_longNA$time,ncol=3,nrow=1625,byrow=T),
+         timespline = matrix(medicare_longNA$timespline,ncol=3,nrow=1625,byrow=T)
+         )
+medi_ini <- list( list(beta=c(-0.05,-0.31,0.44,0.45,0.77,-0.27,0.009,0.001,0.08),
+                       alpha=c(-2.3,0.02,-0.02,-0.89,0.65),
+                       alph=c(1.09,-0.03,-0.42,-4.03,-0.9,0.26),
+                       sigma.b=0.348,
+                       sigma.r1=2.36,
+                       sigma.r2=2.48,
+                       .RNG.name="base::Super-Duper",.RNG.seed=1),
+                  list(beta=c(-0.05,-0.31,0.44,0.45,0.77,-0.27,0.009,0.001,0.08)/2,
+                       alpha=c(-2.3,0.02,-0.02,-0.89,0.65)/2,
+                       alph=c(1.09,-0.03,-0.42,-4.03,-0.9,0.26)/2,
+                       sigma.b=0.348/2,
+                       sigma.r1=2.36/2,
+                       sigma.r2=2.48/2,
+                       .RNG.name="base::Wichmann-Hill",.RNG.seed=2) )
+model3 <- run.jags(model="medicare_SCP.jag",
+                   monitor=c("alpha","beta","alph","sigma.b","sigma.r1","sigma.r2"),
+                   data=medi_data,inits=medi_ini,n.chains=2,thin=5,
+                    sample=10000,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,silent.jags=F)
+
+### Extracting the DIC
+extract(model3, what="DIC")
+
+#### Sampling from the posterior predictive distribution
+model3newpredbiRadmit <- summary(as.mcmc(run.jags(model="medicare_SCP.jag",
+                   monitor=c("biRadmit.new"),
+                   data=medi_data,inits=medi_ini,n.chains=2,thin=5,
+                   sample=12500,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,silent.jags=F)))
+
+model3newpredDX100 <- summary(as.mcmc(run.jags(model="medicare_SCP.jag",
+                   monitor=c("DX100.new"),
+                   data=medi_data,inits=medi_ini,n.chains=2,thin=5,
+                   sample=12500,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,silent.jags=F)))
+
+model3newpredDX101 <- summary(as.mcmc(run.jags(model="medicare_SCP.jag",
+                   monitor=c("DX101.new"),
+                   data=medi_data,inits=medi_ini,n.chains=2,thin=5,
+                   sample=12500,
+                   burnin=35000,adapt=20000,method="parallel",jags.refresh=10,silent.jags=F)))
+```

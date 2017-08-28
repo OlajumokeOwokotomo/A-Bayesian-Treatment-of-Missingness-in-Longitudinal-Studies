@@ -1,0 +1,619 @@
+---
+title: "OlaJumokes Analysis Dataset 1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(haven)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(rjags)
+library(runjags)
+library(R2jags)
+library(ggplot2)
+library(nlme)
+library(data.table)
+library(mice)
+library(minpack.lm)
+library(xtable)
+#knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Reading in The Data and Cleaning
+
+
+```{r}
+#Response=WEIGHT
+jdata <- read_sas("jimmadata.sas7bdat")
+jdata$SEX <- jdata$SEX-1
+#transfroming to spread version
+jdata2 <- data.table::dcast(setDT(jdata),IDNO~VISIT,value.var="WEIGHT")
+names(jdata2)[2:8] <- paste0("Weight",names(jdata2)[2:8])
+
+jdata3 <- data.table::dcast(setDT(jdata),IDNO~VISIT,value.var = "AGE")
+names(jdata3)[2:8] <- paste0("Age",names(jdata3)[2:8])
+
+jdata4 <- data.table::dcast(setDT(jdata),IDNO~VISIT,value.var = "AGENEW")
+names(jdata4)[2:8] <- paste0("AgeNew",names(jdata4)[2:8])
+
+jdata5 <- data.table::dcast(setDT(jdata),IDNO~VISIT,value.var = "LENGTH")
+names(jdata5)[2:8] <- paste0("Length",names(jdata5)[2:8])
+
+jdata6 <- data.table::dcast(setDT(jdata),IDNO~VISIT,value.var = "ALIVE")
+names(jdata6)[2:8] <- paste0("Alive",names(jdata6)[2:8])
+
+## non time-varying covariate
+jdata_others <- jdata  %>% select(IDNO,FAMSIZE,DELIV,SEX,AGEM,
+                  MARITAL,EDUC,OCCUP,ANV_C2,M1_2) %>% group_by(IDNO) %>% summarise_all(.funs=unique)
+#binding things together
+jdata_wide <- merge(jdata_others,jdata2,by='IDNO') %>% merge(x=.,y=jdata3,
+                                                            by='IDNO') %>%
+             merge(x=.,y=jdata4,by='IDNO') %>% merge(x=.,y=jdata5,
+                                                     by='IDNO') %>% 
+             merge(x=.,y=jdata6,by='IDNO')
+#
+rm(list=ls()[!(ls()=="jdata_wide")])
+
+jdata_longP1 <- jdata_wide %>% gather(key=Visit,value=Weight,Weight1:Weight7)
+jdata_longP1 <- jdata_longP1 %>% select(IDNO,AGEM,SEX,EDUC,FAMSIZE,Visit,Weight,MARITAL) %>% 
+  mutate(Visit=as.numeric(gsub("Weight","",Visit)))
+
+jdata_longP2 <- jdata_wide %>% gather(key=Visit,value=Age,Age1:Age7)
+jdata_longP2 <- jdata_longP2 %>% select(IDNO,Visit,Age)%>% 
+  mutate(Visit=as.numeric(gsub("Age","",Visit)))
+
+jdata_longP3 <- jdata_wide %>% gather(key=Visit,value=Length,Length1:Length7) 
+jdata_longP3 <- jdata_longP3 %>% select(IDNO,Visit,Length) %>% 
+  mutate(Visit=as.numeric(gsub("Length","",Visit)))
+
+jdata_longP4 <- jdata_wide %>% gather(key=Visit,value=AgeNew,AgeNew1:AgeNew7)
+jdata_longP4 <- jdata_longP4 %>% select(IDNO,Visit,AgeNew)%>% 
+  mutate(Visit=as.numeric(gsub("AgeNew","",Visit)))
+
+jdata_longP <- merge(jdata_longP1,jdata_longP2,by=c("IDNO","Visit")) %>% merge(x=.,y=jdata_longP3,by=c("IDNO","Visit")) %>% merge(x=.,y=jdata_longP4,by=c("IDNO","Visit"))
+
+jdata_longP <- jdata_longP[order(jdata_longP$IDNO),]
+
+rm(list=ls()[!(ls() %in% c("jdata_wide","jdata_longP"))])
+
+##########
+
+```
+
+### Exploration
+
+```{r}
+###### Individual profile
+ggplot(data=jdata_longP,aes(x=Age,y=Weight,group=IDNO)) + geom_line(alpha=0.2) + theme_classic() + geom_smooth(method = "loess",col="red",formula = jdata_longP$Weight~jdata_longP$Age,na.rm = T)
+
+#coloured by gender
+ggplot(data=jdata_longP,aes(x=Age,y=Weight,group=IDNO,color=factor(SEX))) + geom_point(alpha=0.5) + geom_line(alpha=0.2) + theme_classic() + geom_smooth(method = "loess",col="red",formula = jdata_longP$Weight~jdata_longP$Age,na.rm = T)
+
+ggplot(data=jdata_longP,aes(x=AgeNew,y=Weight,group=IDNO)) + geom_point(alpha=0.5) + geom_line(alpha=0.2) + theme_classic() + geom_smooth(method = "loess",col="red",formula = jdata_longP$Weight~jdata_longP$Age,na.rm = T)
+
+###### Missing Data in the response pattern
+m1 = md.pattern(jdata_wide[,c(11:17)])
+mm1 = as.data.frame(m1)
+xtable(mm1)
+
+
+####### for age
+mpa <- missingpattern(jdata_wide[,c(18:24)])
+table(mpa)
+
+###### Missing Data in selected covariates
+jdata_wide$IDNO[is.na(jdata_wide$EDUC)]    #one
+jdata_wide$IDNO[is.na(jdata_wide$FAMSIZE)] #one
+jdata_wide$IDNO[is.na(jdata_wide$SEX)]     #none
+jdata_wide$IDNO[is.na(jdata_wide$AGEM)]    #none
+
+
+########### Correlation matrix
+pairs(jdata_wide[,c(11:17)])
+
+##This is however Bias since we computed the means neglecting the 
+#missing values
+
+##creating between and within version of length
+#Length
+#between effect
+LengthB <- jdata_longP %>% group_by(IDNO) %>% summarise(LengthB=mean(Length,na.rm=T))
+#merging between Length with original dataset
+jdata_longP <- merge(jdata_longP,LengthB,by="IDNO",sort=F)
+jdata_longP$LengthB[which(is.na(jdata_longP$Length)==T)] <- NA
+#Within effect
+jdata_longP$LengthW <- jdata_longP$Length - jdata_longP$LengthB
+
+#Age
+AgeB <- jdata_longP %>% group_by(IDNO) %>% summarise(AgeB=mean(Age,na.rm=T))
+jdata_longP <- merge(jdata_longP,AgeB,by="IDNO",sort=F)
+jdata_longP$AgeB[which(is.na(jdata_longP$Age)==T)] <- NA
+#Within effect
+jdata_longP$AgeW <- jdata_longP$Age - jdata_longP$AgeB
+
+rm(list=ls()[!(ls() %in% c("jdata_wide","jdata_longP"))])
+
+```
+
+
+## SCP Method of Imputation (Traditional)
+
+### Full Data Analysis (Deleted covariates)
+
+```{r}
+### Full Data Analysis i.e. (Deleting the rows with missing covariate)
+jdata_longP$id <- rep(1:496,each=7)
+jdata_longPF <-  jdata_longP[!(is.na(jdata_longP$Age) |
+                              is.na(jdata_longP$Length)),]
+
+obsperpatient <- rowSums(table(jdata_longPF$IDNO,jdata_longPF$Visit))
+
+
+
+cat("
+   # Then define model
+   model
+   {
+        for(b in 1:N){
+          # Define model for each observational unit the response
+          Weight[b] ~ dnorm(mu[b], tau.e)
+            
+          mu[b]  <- ((beta[1]*Sex[b] 
+          + beta[2]*WL[b] + beta[3]*BL[b]
+          + beta[4]*AgeM[b] + u[id[b],1]) / (1 + exp(-(Age[b] - beta[5]) / 
+          beta[6]) )) + u[id[b],2]
+
+          
+    }
+  #------------------------------------------------------------
+   # Priors:
+
+    # For parameters in the original model
+      for(j in 1:6){
+          beta[j] ~ dnorm(0.0,1.0E-5)
+        }
+  
+    # Define prior for the variance-covariance matrix of the data
+    sigma.e ~ dunif(0,100)
+    tau.e <- pow(sigma.e,-2)
+
+    #variance-covariance matrix for random effects
+      zero[1] <- 0
+      zero[2] <- 0
+      # Intercept and slope for each person, including random effects
+       for( j in 1:496 )
+        {
+          u[j,1:2] ~ dmnorm(zero,R)
+        }
+        sigma.u1 ~ dunif(0,100)
+        sigma.u2 ~ dunif(0,100)
+        covu <- sigma.u1*sigma.u2*coru
+        coru ~ dunif(-1,1)
+        cov[1,1] <- pow(sigma.u1,2)
+        cov[1,2] <- covu
+        cov[2,1] <- covu
+        cov[2,2] <- pow(sigma.u2,2)
+        R[1:2,1:2] <- inverse(cov[,])
+}
+",file="scp_TRA_complete.jag")
+
+
+###getting mean for each patient
+ms <- jdata_longPF %>% group_by(IDNO) %>% summarise(mm=mean(Length))
+
+mdata_full2 <- list(N=3070,
+              Weight=jdata_longPF$Weight,
+              Age=jdata_longPF$Age,
+              AgeM=jdata_longPF$AGEM,
+              Sex=jdata_longPF$SEX,
+              BL=rep(ms$mm,times=obsperpatient),
+              WL=jdata_longPF$Length-rep(ms$mm,times=obsperpatient),
+              id=jdata_longPF$id)
+
+minits_full2 <- list(list(sigma.e=0.19,sigma.u1=3.8,sigma.u2=1.07,
+                          coru=-0.9,
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0),
+                    .RNG.name="base::Super-Duper", .RNG.seed=1),
+                list(sigma.e=0.19/2,sigma.u1=3.8/2,sigma.u2=1.07/2,
+                     coru=-0.9/2,
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0)/2,
+                    .RNG.name="base::Wichmann-Hill", .RNG.seed=2)
+                )
+
+model1 <- run.jags(model="scp_TRA_complete.jag",monitor=
+                 c("beta","sigma.e","sigma.u1","sigma.u2","coru"),
+                 data=mdata_full2,
+                   inits=minits_full2,n.chains=2,sample=12500,burnin=35000,
+               thin=5,adapt=20000,method="parallel",jags.refresh=10,
+               silent.jags=F)
+### Extracting the DIC
+extract(model1, what="DIC")
+
+```
+
+
+## SCP Method of Imputation (linear Imputation model for length)
+
+### Traditional Method
+```{r}
+cat("
+   # Then define model
+   model
+   {
+        for(b in 1:N){
+          #correcting for time varying covariate Length (Traditional)
+            mL[b] <- mean(Length[b,])
+
+          for(f in 1:F){
+          # Define model for each observational unit the response
+          Weight[b,f] ~ dnorm(mu[b,f], tau.e)
+          Weight.new[b,f] ~ dnorm(mu[b,f], tau.e)
+
+          mu[b,f] <- ((beta[1]*Sex[b] 
+          + beta[2]*(Length[b,f]- mL[b]) + beta[3]*mL[b]
+          + beta[4]*AgeM[b] + u[b,1]) / (1 + exp(-(Age[b,f] - beta[5]) / 
+          beta[6]) )) + u[b,2]
+
+          # Defining the missing data model
+          # covariate imputed model for Length
+            Length[b,f] ~ dnorm(mu.L[b,f], tau.l)
+            Length.new[b,f] ~ dnorm(mu.L[b,f], tau.l)
+            mu.L[b,f] <-   alpha[1] + alpha[2]*Sex[b] + alpha[3]*AgeM[b]  +
+                          alpha[4]*Visit[b,f] + alpha[5]*Visit2[b,f]
+                          + r1[b,1] 
+                          + r1[b,2]*Visit[b,f] 
+                          
+
+            #main imputation model for Age
+            Age[b,f] ~ dnorm(mu.a[b,f],tau.a)
+            Age.new[b,f] ~ dnorm(mu.a[b,f],tau.a)
+            mu.a[b,f] <-  alph[1] + alph[2]*Sex[b] + alph[3]*AgeM[b] 
+              + alph[4]*(Length[b,f] - mL[b]) + alph[5]*mL[b] 
+              + alph[6]*Visit[b,f]
+              + r2[b,1] + r2[b,2]*Visit[b,f]
+          }
+          
+        }
+
+    
+#------------------------------------------------------------
+   # Priors:
+# Priors:
+        #priors for Length model (CIM)
+          for(c in 1:5){
+              alpha[c] ~ dnorm(0,1.0E-5)
+          }
+          tau.l <- pow(sigma.l,-2)
+          sigma.l ~ dunif(0,100)
+
+         #priors for Age model (CIM)
+          for(d in 1:6){
+              alph[d] ~ dnorm(0,1.0E-5)
+          }
+          tau.a <- pow(sigma.a,-2)
+          sigma.a ~ dunif(0,100)
+
+        #prior for the random effect in the Length model (CIM)
+          zeroL[1] <- 0
+          zeroL[2] <- 0
+          for(b in 1:N){
+              r1[b,1:2] ~ dmnorm(zeroL,RL)
+          }
+          sigma.r[1] ~ dunif(0,100)
+          sigma.r[2] ~ dunif(0,100)
+          covl <- sigma.r[1]*sigma.r[2]*corl
+          corl ~ dunif(-1,1)
+          covll[1,1] <- pow(sigma.r[1],2)
+          covll[1,2] <- covl
+          covll[2,1] <- covl
+          covll[2,2] <- pow(sigma.r[2],2)
+          RL[1:2,1:2] <- inverse(covll[,])
+          
+
+
+      #prior for the random effect in the Age model (CIM)
+          zeroA[1] <- 0
+          zeroA[2] <- 0
+          for(b in 1:N){
+              r2[b,1:2] ~ dmnorm(zeroA,RA)
+          }
+          sigma.r[3] ~ dunif(0,100)
+          sigma.r[4] ~ dunif(0,100)
+          cova <- sigma.r[3]*sigma.r[4]*cora
+          cora ~ dunif(-1,1)
+          covaa[1,1] <- pow(sigma.r[3],2)
+          covaa[1,2] <- cova
+          covaa[2,1] <- cova
+          covaa[2,2] <- pow(sigma.r[4],2)
+          RA[1:2,1:2] <- inverse(covaa[,])
+
+    # For parameters in the original model
+      for(j in 1:6){
+          beta[j] ~ dnorm(0.0,1.0E-5)
+        }
+  
+    # Define prior for the variance-covariance matrix of the data
+    sigma.e ~ dunif(0,100)
+    tau.e <- pow(sigma.e,-2)
+
+    #variance-covariance matrix for random effects
+      zero[1] <- 0
+      zero[2] <- 0
+      # Intercept and slope for each person, including random effects
+       for( b in 1:N )
+        {
+          u[b,1:2] ~ dmnorm(zero,R)
+        }
+        sigma.u1 ~ dunif(0,100)
+        sigma.u2 ~ dunif(0,100)
+        covu <- sigma.u1*sigma.u2*coru
+        coru ~ dunif(-1,1)
+        cov[1,1] <- pow(sigma.u1,2)
+        cov[1,2] <- covu
+        cov[2,1] <- covu
+        cov[2,2] <- pow(sigma.u2,2)
+        R[1:2,1:2] <- inverse(cov[,])
+}
+",file="scp_TRA.jag")
+
+mdata2 <- list(N=496,
+              F=7,
+              Weight=as.matrix(jdata_wide[,11:17]),
+              Length=as.matrix(jdata_wide[,32:38]),
+              Age=as.matrix(jdata_wide[,18:24]),
+              AgeM=jdata_wide$AGEM,
+              Sex=jdata_wide$SEX,
+              Visit=matrix(jdata_longP$Visit,ncol=7,nrow=496,byrow=T),
+              Visit2=matrix(jdata_longP$Visit,ncol=7,nrow=496,byrow=T)^2)
+
+
+minits2 <- list(list(sigma.e=0.19,sigma.u1=3.8,sigma.u2=1.07,coru=-0.9,
+                     sigma.r=c(4.2,0.15,4.8,0.12),
+                     sigma.a=20.9,sigma.l=4.8,cora=-0.8,
+                     corl=-0.25,
+                     alpha=c(41.3,-1.3,0.01,7.98,-0.6),
+                     alph=c(-54.7,-0.42,-0.01,-0.05,-0.09,59.8),
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0),
+                    .RNG.name="base::Super-Duper", .RNG.seed=1),
+                list(sigma.e=0.19/2,sigma.u1=3.8/2,sigma.u2=1.07/2,coru=-0.9/2,
+                     sigma.r=c(4.2/2,0.15/2,4.8/2,0.12/2),
+                     sigma.a=20.9/2,sigma.l=4.8/2,cora=-0.8/2,
+                     corl=-0.25/2,
+                     alpha=c(41.3,-1.3,0.01,7.98,-0.6)/2,
+                     alph=c(-54.7,-0.42,-0.01,-0.05,-0.09,59.8)/2,
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0)/2,
+                    .RNG.name="base::Wichmann-Hill", .RNG.seed=2)
+                )
+model2 <- run.jags(model="scp_TRA.jag",monitor=
+                 c("alpha","beta","alph","sigma.e","sigma.u1",
+                                                "sigma.u2","sigma.l",
+                                                 "sigma.r",                                                 "sigma.a","coru","corl",
+                                                 "cora"),data=mdata2,
+                   inits=minits2,n.chains=2,sample=12500,burnin=35000,
+              adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,              jags.refresh=0.7,method="parallel")
+
+### Extracting the DIC
+extract(model2, what="DIC")
+
+model2newpredweight <- run.jags(model="scp_TRA.jag",monitor=
+                 c("Weight.new"),
+                 data=mdata2,
+                   inits=minits2,n.chains=2,sample=12500,burnin=35000,
+               adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+               jags.refresh=0.7,method="parallel")
+model2newpredlength <- run.jags(model="scp_TRA.jag",monitor=
+                 c("Length.new"),
+                 data=mdata2,
+                   inits=minits2,n.chains=2,sample=12500,burnin=35000,
+               adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+               jags.refresh=0.7,method="parallel")
+model2newpredage<- run.jags(model="scp_TRA.jag",monitor=
+                 c("Age.new"),
+                 data=mdata2,
+                   inits=minits2,n.chains=2,sample=12500,burnin=35000,
+               adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+               jags.refresh=0.7,method="parallel")
+
+plot(model2,plot.type="trace",vars=c("alpha","beta","alph","sigma.e","sigma.u1",
+                                                  "sigma.u2","sigma.l",
+                                                 "sigma.r",
+                                                "sigma.a","coru","corl",
+                                                "cora"))
+
+```
+
+
+## SCP Method of Imputation (Non-linear Imputation model for length)
+
+### Traditional Method
+
+```{r}
+cat("
+   # Then define model
+   model
+   {
+        for(b in 1:N){
+          #correcting for time varying covariate Length (Traditional)
+            mL[b] <- mean(Length[b,])
+
+          for(f in 1:F){
+          # Define model for each observational unit the response
+          Weight[b,f] ~ dnorm(mu[b,f], tau.e)
+          Weight.new[b,f] ~ dnorm(mu[b,f], tau.e)
+
+          mu[b,f] <- ((beta[1]*Sex[b] 
+          + beta[2]*(Length[b,f]- mL[b]) + beta[3]*mL[b]
+          + beta[4]*AgeM[b] + u[b,1]) / (1 + exp(-(Age[b,f] - beta[5]) / 
+          beta[6]) )) + u[b,2]
+
+          # Defining the missing data model
+          # covariate imputed model for Length
+            Length[b,f] ~ dnorm(mu.L[b,f], tau.l)
+            Length.new[b,f] ~ dnorm(mu.L[b,f], tau.l)
+
+            mu.L[b,f] <- ((alpha[1]*Sex[b] 
+                          + alpha[2]*AgeM[b] + r1[b,1]) / (1 + 
+                          exp(-(Visit[b,f] - alpha[3]) / alpha[4]) )) + r1[b,2]
+                          
+
+            #main imputation model for Age
+            Age[b,f] ~ dnorm(mu.a[b,f],tau.a)
+            Age.new[b,f] ~ dnorm(mu.a[b,f],tau.a)
+
+            mu.a[b,f] <-  alph[1] + alph[2]*Sex[b] + alph[3]*AgeM[b] 
+              + alph[4]*(Length[b,f] - mL[b]) + alph[5]*mL[b] 
+              + alph[6]*Visit[b,f]
+              #+ r2[b,1] + r2[b,2]*Visit[b,f]
+
+
+        }
+    }
+
+   
+  #------------------------------------------------------------
+   # Priors:
+# Priors:
+        #priors for Length model (CIM)
+          for(c in 1:4){
+              alpha[c] ~ dnorm(0,1.0E-5)
+          }
+          tau.l <- pow(sigma.l,-2)
+          sigma.l ~ dunif(0,100)
+
+         #priors for Age model (CIM)
+          for(d in 1:6){
+              alph[d] ~ dnorm(0,1.0E-5)
+          }
+          tau.a <- pow(sigma.a,-2)
+          sigma.a ~ dunif(0,100)
+
+        #prior for the random effect in the Length model (CIM)
+          zeroL[1] <- 0
+          zeroL[2] <- 0
+          for(b in 1:N){
+              r1[b,1:2] ~ dmnorm(zeroL,RL)
+          }
+          sigma.r[1] ~ dunif(0,100)
+          sigma.r[2] ~ dunif(0,100)
+          
+          covl <- sigma.r[1]*sigma.r[2]*corl
+          corl ~ dunif(-1,1)
+
+          covll[1,1] <- pow(sigma.r[1],2)
+          covll[1,2] <- covl
+          covll[2,1] <- covl
+          covll[2,2] <- pow(sigma.r[2],2)
+          RL[1:2,1:2] <- inverse(covll[,])
+          
+
+      #prior for the random effect in the Age model (CIM)
+          zeroA[1] <- 0
+          zeroA[2] <- 0
+          for(b in 1:N){
+              r2[b,1:2] ~ dmnorm(zeroA,RA)
+          }
+          sigma.r[3] ~ dunif(0,100)
+          sigma.r[4] ~ dunif(0,100)
+          cova <- sigma.r[3]*sigma.r[4]*cora
+          cora ~ dunif(-1,1)
+          covaa[1,1] <- pow(sigma.r[3],2)
+          covaa[1,2] <- cova
+          covaa[2,1] <- cova
+          covaa[2,2] <- pow(sigma.r[4],2)
+          RA[1:2,1:2] <- inverse(covaa[,])
+
+    # For parameters in the original model
+      for(j in 1:6){
+          beta[j] ~ dnorm(0.0,1.0E-5)
+        }
+  
+    # Define prior for the variance-covariance matrix of the data
+    sigma.e ~ dunif(0,100)
+    tau.e <- pow(sigma.e,-2)
+
+    #variance-covariance matrix for random effects
+      zero[1] <- 0
+      zero[2] <- 0
+      # Intercept and slope for each person, including random effects
+       for( b in 1:N )
+        {
+          u[b,1:2] ~ dmnorm(zero,R)
+        }
+        sigma.u1 ~ dunif(0,100)
+        sigma.u2 ~ dunif(0,100)
+        covu <- sigma.u1*sigma.u2*coru
+        coru ~ dunif(-1,1)
+        cov[1,1] <- pow(sigma.u1,2)
+        cov[1,2] <- covu
+        cov[2,1] <- covu
+        cov[2,2] <- pow(sigma.u2,2)
+        R[1:2,1:2] <- inverse(cov[,])
+}
+",file="scp_TRA.jag")
+
+mdata2new <- list(N=496,
+              F=7,
+              Weight=as.matrix(jdata_wide[,11:17]),
+              Length=as.matrix(jdata_wide[,32:38]),
+              Age=as.matrix(jdata_wide[,18:24]),
+              AgeM=jdata_wide$AGEM,
+              Sex=jdata_wide$SEX,
+              Visit=matrix(jdata_longP$Visit,ncol=7,nrow=496,byrow=T))
+
+minits2new <- list(list(sigma.e=2.19,sigma.u1=3.8,sigma.u2=1.07,coru=-0.9,
+                     sigma.r=c(40.3,54.8,4.8,0.12),
+                     sigma.a=20.9,sigma.l=4.2,cora=-0.8,
+                     corl=-0.9,
+                     alpha=c(3.6,2.6,-0.61,1.85),
+                     alph=c(-54.7,-0.42,-0.01,-0.05,-0.09,59.8),
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0),
+                    .RNG.name="base::Super-Duper", .RNG.seed=1),
+                list(sigma.e=0.19/2,sigma.u1=3.8/2,sigma.u2=1.07/2,coru=-0.9/2,
+                     sigma.r=c(40.3,54.8,4.8,0.12)/2,
+                     sigma.a=20.9/2,sigma.l=4.2/2,cora=-0.8/2,
+                     corl=-0.9/2,
+                     alpha=c(3.6,2.6,-0.61,1.85)/2,
+                     alph=c(-54.7,-0.42,-0.01,-0.05,-0.09,59.8)/2,
+                     beta=c(-0.4,0.08,0.12,0.005,-2.6,73.0)/2,
+                    .RNG.name="base::Wichmann-Hill", .RNG.seed=2)
+                )
+model3 <- run.jags(model="scp_TRA.jag",monitor=
+                  c("alpha","beta","alph","sigma.e","sigma.u1",
+                    "sigma.u2","sigma.l","sigma.r","sigma.a","coru","corl",
+                    "cora"),data=mdata2new,
+                    inits=minits2new,n.chains=2,sample=12500,burnin=35000,
+                adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+                jags.refresh=0.7,method="parallel")
+### Extracting the DIC
+extract(model3, what="DIC")
+
+model3newpredlength <- summary(as.mcmc(run.jags(model="scp_TRA.jag",monitor=
+                  c("Length.new"),data=mdata2new,
+                    inits=minits2new,n.chains=2,sample=12500,burnin=35000,
+                adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+                jags.refresh=0.7,method="parallel")))
+model3newpredage <- summary(as.mcmc(run.jags(model="scp_TRA.jag",monitor=
+                  c("Age.new"),data=mdata2new,
+                    inits=minits2new,n.chains=2,sample=12500,burnin=35000,
+                adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+                jags.refresh=0.7,method="parallel")))
+
+model3newpredweight <- summary(as.mcmc(run.jags(model="scp_TRA.jag",monitor=
+                  c("Weight.new"),data=mdata2new,
+                    inits=minits2new,n.chains=2,sample=12500,burnin=35000,
+                adapt=20000,thin=5,keep.jags.files=F,silent.jags=FALSE,
+                jags.refresh=0.7,method="parallel")))
+
+#### checking the trace plots
+
+plot(model3,plot.type="trace",vars=c("alpha","beta","alph","sigma.e","sigma.u1",
+                                                  "sigma.u2","sigma.l",
+                                                 "sigma.r",
+                                                "sigma.a","coru","corl",
+                                               "cora"))
+```
+
+
+
